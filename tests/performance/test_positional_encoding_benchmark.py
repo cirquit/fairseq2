@@ -107,6 +107,89 @@ def test_torch_compile_comparison():
         compile_speedup = eager_time / inductor_time
         print(f"{name:9} | Eager: {eager_time*1000:.1f}ms | Inductor: {inductor_time*1000:.1f}ms | {compile_speedup:.2f}x")
 
+def test_numerical_accuracy(compile_encoders=False):
+    """Test numerical accuracy between implementations across sequence lengths."""
+    device = get_device()
+    encoding_dim = 256 
+    max_seq_len = 1_000_000  # 1M tokens
+    theta = 1_000_000.0
+    
+    mode_str = "Compiled" if compile_encoders else "Eager"
+    print(f"\nNumerical Accuracy Test - {mode_str} Mode (device: {device.type})")
+    print(f"Encoding dim: {encoding_dim}, Max seq len: {max_seq_len:,}")
+    
+    # Create encoders
+    rotary_encoder = RotaryEncoder(encoding_dim, max_seq_len, theta=theta, device=device)
+    reference_encoder = ReferenceRotaryEncoder(encoding_dim, max_seq_len, theta=theta, device=device)
+    
+    # Compile if requested
+    if compile_encoders:
+        if device.type == "cuda":
+            rotary_encoder = torch.compile(rotary_encoder, backend="inductor", dynamic=True)
+            reference_encoder = torch.compile(reference_encoder, backend="inductor", dynamic=True)
+        else:
+            print(f"Skipping compilation - requires CUDA, got {device.type}")
+            return
+    
+    # Test different sequence lengths
+    seq_lengths = [1024, 4096, 16384, 65536, 262144, 1_000_000]  # Up to 1M
+    batch_size = 1  # Keep small for memory
+    
+    print(f"\n{'SeqLen':>8} | {'MaxDiff':>10} | {'MeanDiff':>10} | {'StdDiff':>10} | {'Status':>8}")
+    print("-" * 55)
+    
+    for seq_len in seq_lengths:
+        if seq_len > max_seq_len:
+            continue
+            
+        try:
+            # Create test data
+            seqs, batch_layout = create_test_batch(batch_size, seq_len, encoding_dim, device)
+            
+            # Get outputs from both encoders
+            with torch.no_grad():
+                rotary_output = rotary_encoder(seqs, batch_layout)
+                reference_output = reference_encoder(seqs, batch_layout)
+            
+            # Calculate differences
+            diff = torch.abs(rotary_output - reference_output)
+            max_diff = torch.max(diff).item()
+            mean_diff = torch.mean(diff).item()
+            std_diff = torch.std(diff).item()
+            
+            # Determine status
+            if max_diff < 1e-6:
+                status = "PERFECT"
+            elif max_diff < 1e-5:
+                status = "GOOD"
+            elif max_diff < 1e-4:
+                status = "OK"
+            else:
+                status = "WARN"
+            
+            print(f"{seq_len:>8,} | {max_diff:>9.2e} | {mean_diff:>9.2e} | {std_diff:>9.2e} | {status:>8}")
+            
+            # Clean up memory for large sequences
+            del seqs, batch_layout, rotary_output, reference_output, diff
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+                
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print(f"{seq_len:>8,} | {'OOM':>9} | {'OOM':>9} | {'OOM':>9} | {'SKIP':>8}")
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+            else:
+                print(f"{seq_len:>8,} | {'ERROR':>9} | {'ERROR':>9} | {'ERROR':>9} | {'FAIL':>8}")
+        except Exception as e:
+            print(f"{seq_len:>8,} | {'ERROR':>9} | {'ERROR':>9} | {'ERROR':>9} | {'FAIL':>8}")
+
+
+def test_numerical_accuracy_compiled():
+    """Test numerical accuracy with torch.compile enabled."""
+    test_numerical_accuracy(compile_encoders=True)
+
+
 def test_zzz_benchmark_summary():
     if not benchmark_results:
         return
@@ -125,4 +208,6 @@ if __name__ == "__main__":
         test_benchmark_positional_encoders(encoding_dim, batch_size, seq_len)
     
     test_torch_compile_comparison()
+    test_numerical_accuracy()
+    test_numerical_accuracy_compiled()
     test_zzz_benchmark_summary()
