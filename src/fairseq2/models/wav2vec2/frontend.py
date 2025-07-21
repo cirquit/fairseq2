@@ -147,6 +147,8 @@ class Wav2Vec2Frontend(TransformerFrontend):
             :math:`(N,S,*)`, where :math:`N` is the batch size, :math:`S` is the
             sequence length, and :math:`*` is any number of sequence-specific
             dimensions including none.
+        :param seqs_layout:
+            The sequence layout information containing batch structure and lengths.
 
         :returns:
             - The normalized features. *Shape:* :math:`(N,S_{out},E)`, where
@@ -177,9 +179,8 @@ class Wav2Vec2Frontend(TransformerFrontend):
             The features to process. *Shape:* :math:`(N,S,E)`, where :math:`N`
             is the batch size, :math:`S` is the sequence length, and :math:`E`
             is the dimensionality of the features.
-        :param padding_mask:
-            The padding mask of ``seqs``. *Shape:* :math:`(N,S)`, where :math:`N`
-            is the batch size and :math:`S` is the sequence length.
+        :param seqs_layout:
+            The sequence layout information containing batch structure and lengths.
         :param masker:
             If not ``None``, the features will be masked and the applied
             temporal mask will be returned as the third element of the tuple.

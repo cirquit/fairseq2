@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, Optional, final
 
 import torch
 import torch.nn as nn
@@ -15,37 +15,30 @@ from torch import Tensor
 from torch.nn import Module, Parameter
 from typing_extensions import override
 
+from fairseq2 import device
 from fairseq2.data_type import DataType
 from fairseq2.device import Device
 from fairseq2.error import InternalError
 from fairseq2.nn import BatchLayout
-from fairseq2.nn.padding import PaddingMask  # TODO:cirquit resolve this import later
 from fairseq2.nn.utils.fairseq1_mask import compute_mask_indices
 from fairseq2.nn.utils.mask import RowMaskFactory, compute_row_mask
 from fairseq2.typing import get_name_or_self
-
-# TODO:cirquit unclear whether to use fairseq2.data_type of fairseq2.typing
 
 
 class Wav2Vec2Masker(Module, ABC):
     """Masks extracted wav2vec 2.0 features."""
 
-    # TODO:cirquit - replace PaddingMask with BatchLayout and update the implementation below if necessary
-    # replaced seqs_layout for padding_mask (prio w2v2)
     @abstractmethod
     def forward(
-        self, seqs: Tensor, padding_mask: PaddingMask | None
+        self, seqs: Tensor, batch_layout: BatchLayout | None
     ) -> tuple[Tensor, Tensor]:
         """
         :param seqs:
             The sequences to mask. *Shape:* :math:`(N,S,M)`, where :math:`N` is
             the batch size, :math:`S` is the sequence length, and :math:`M` is
             the dimensionality of the model.
-        :param padding_mask:
-            # TODO:cirquit - update comment to reflect the use of padding_mask instead of seq_layout
-            An array where each element represents the length of the sequence at
-            the same index in ``seqs``. *Shape:* :math:`(N)`, where :math:`N` is
-            the batch size.
+        :param batch_layout:
+            The sequence layout information containing batch structure and lengths.
 
         :returns:
             - The input sequences with mask applied. *Shape:* Same as ``seqs``.
@@ -154,11 +147,11 @@ class StandardWav2Vec2Masker(Wav2Vec2Masker):
 
     @override
     def forward(
-        self, seqs: Tensor, padding_mask: PaddingMask | None
+        self, seqs: Tensor, batch_layout: BatchLayout | None
     ) -> tuple[Tensor, Tensor]:
 
-        # TODO:cirquit Check if this correctly used, if yes, no need to use the BatchLayout anymore
-        if padding_mask and padding_mask.seq_lens.packed:
+        # TODO: cirquit - implement masking for packed batches
+        if batch_layout and batch_layout.packed:
             raise ValueError("`seqs` must not be a packed batch.")
 
         batch_size, seq_len, model_dim = seqs.shape
@@ -169,14 +162,18 @@ class StandardWav2Vec2Masker(Wav2Vec2Masker):
                 shape=(batch_size, seq_len),
                 span_len=self.temporal_span_len,
                 max_mask_prob=self.max_temporal_mask_prob,
-                row_lens=padding_mask.seq_lens if padding_mask is not None else None,
+                row_lens=batch_layout.seq_lens_pt if batch_layout is not None else None,
                 min_num_spans=self.min_num_temporal_mask_spans,
                 device=seqs.device,
             )
         else:
             mask_indices = compute_mask_indices(
                 (batch_size, seq_len),
-                None if padding_mask is None else ~padding_mask.materialize(),
+                (
+                    None
+                    if batch_layout is None
+                    else self._create_fairseq1_padding_mask(batch_layout)
+                ),
                 self.max_temporal_mask_prob,
                 self.temporal_span_len,
                 mask_type="static",
@@ -234,3 +231,35 @@ class StandardWav2Vec2Masker(Wav2Vec2Masker):
             s = f"{s}, mask_factory={mask_factory}"
 
         return s
+
+    # TODO: cirquit - write a test for this
+    def _create_fairseq1_padding_mask(
+        self, batch_layout: BatchLayout | None
+    ) -> Optional[Tensor]:
+        """
+        Creates boolean padding mask for unpacked sequences.
+        Valid positions are `False`, invalid positions (padded) are `True`.
+
+        :param batch_layout:
+            The sequence layout information containing batch structure and lengths.
+
+        :returns:
+            The mask. *Shape:* :math: `(N,S)`, where :math:`N` is the batch size
+            and :math:`S` is the maximum sequence length.
+        """
+        if batch_layout is None:
+            return None
+
+        # (N, ) - all sequence lengths
+        seq_lens = batch_layout.seq_lens_pt
+        batch_size = seq_lens.size(0)
+        max_seq_len = batch_layout.max_seq_len
+
+        # (N, S) - 0 to max_seq_len for every sequence
+        indices = torch.arange(max_seq_len, device=device).expand(batch_size, -1)
+
+        # (N) -> (N, S) - individual sequence length as every entry in the tensor
+        lengths = seq_lens.unsqueeze(1).expand(-1, max_seq_len)
+
+        # (N, S)
+        return indices >= lengths

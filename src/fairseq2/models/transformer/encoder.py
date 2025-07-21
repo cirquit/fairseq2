@@ -41,9 +41,8 @@ class TransformerEncoder(LayerStack):
         :param seqs: The sequences to encode. *Shape:* :math:`(N,S,M)`, where
             :math:`N` is the batch size, :math:`S` is the sequence length, and
             :math:`M` is the dimensionality of the model.
-        :param padding_mask: The padding mask of ``seqs``. *Shape:* :math:`(N,S)`,
-            where :math:`N` is the batch size and :math:`S` is the sequence
-            length.
+        :param seqs_layout:
+            The sequence layout information containing batch structure and lengths.
 
         :returns: The encoder output. *Shape:* Same as ``seqs``.
         """
